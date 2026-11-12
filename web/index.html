@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ship Radar · Σαρωνικός</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html, body, #map { height: 100%; margin: 0; background: #0b1622; }
+  .panel { position: absolute; top: 12px; right: 12px; z-index: 1000; background: rgba(11,22,34,.9);
+           color: #e6edf3; font: 13px system-ui, sans-serif; padding: 12px 14px; border-radius: 10px;
+           min-width: 180px; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+  .panel h1 { font-size: 15px; margin: 0 0 6px; }
+  .panel .big { font-size: 26px; font-weight: 700; }
+  .row { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .muted { color: #8b9bb0; font-size: 11px; margin-top: 8px; }
+  .ship svg { overflow: visible; }
+  .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.9) contrast(.9); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="panel">
+  <h1>🚢 Ship Radar · Σαρωνικός</h1>
+  <div class="big" id="count">–</div>
+  <div>πλοία σε κίνηση: <b id="moving">–</b></div>
+  <div id="legend"></div>
+  <div class="muted" id="upd">φόρτωση…</div>
+</div>
+<script>
+const CATS = [
+  ["Επιβατηγά", "#4fc3f7", t => t >= 60 && t <= 69],
+  ["Φορτηγά",   "#81c784", t => t >= 70 && t <= 79],
+  ["Δεξαμενόπλοια", "#e57373", t => t >= 80 && t <= 89],
+  ["Ρυμουλκά / pilot", "#ffb74d", t => [31, 32, 50, 52].includes(t)],
+  ["Αλιευτικά", "#ba68c8", t => t === 30],
+  ["Σκάφη αναψυχής", "#f06292", t => t === 36 || t === 37],
+  ["Άλλα / άγνωστα", "#b0bec5", t => true],
+];
+const cat = t => CATS.find(c => c[2](t ?? -1));
+const TYPES = {30:"Αλιευτικό",31:"Ρυμουλκό",32:"Ρυμουλκό",35:"Πολεμικό",36:"Ιστιοφόρο",37:"Αναψυχής",
+               50:"Pilot",51:"SAR",52:"Ρυμουλκό",55:"Λιμενικό"};
+const typeName = t => TYPES[t] || (t>=60&&t<=69?"Επιβατηγό":t>=70&&t<=79?"Φορτηγό":t>=80&&t<=89?"Δεξαμενόπλοιο":t>=40&&t<=49?"Ταχύπλοο (HSC)":"Άγνωστος τύπος");
+
+document.getElementById("legend").innerHTML = CATS.map(c =>
+  `<div class="row"><span class="dot" style="background:${c[1]}"></span>${c[0]}</div>`).join("");
+
+const map = L.map("map").setView([37.86, 23.55], 10);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "&copy; OpenStreetMap · AIS: aisstream.io", maxZoom: 18
+}).addTo(map);
+
+const markers = {};
+function icon(s) {
+  const color = cat(s.type)[1];
+  const moving = (s.sog ?? 0) > 0.5;
+  const rot = s.hdg ?? s.cog ?? 0;
+  const shape = moving
+    ? `<path d="M0,-9 L5,7 L0,4 L-5,7 Z" fill="${color}" stroke="#0b1622" stroke-width="1"/>`
+    : `<circle r="4" fill="${color}" stroke="#0b1622" stroke-width="1"/>`;
+  return L.divIcon({ className: "ship", iconSize: [20, 20],
+    html: `<svg width="20" height="20"><g transform="translate(10,10) rotate(${rot})">${shape}</g></svg>` });
+}
+function popup(s) {
+  const dims = s.length ? `${s.length} m${s.beam ? " × " + s.beam + " m" : ""}` : "–";
+  const ago = Math.round((Date.now()/1000 - s.ts) / 60);
+  return `<b>${s.name || "MMSI " + s.mmsi}</b><br>${typeName(s.type)}<br>
+    Διαστάσεις: ${dims}<br>Ταχύτητα: ${(s.sog ?? 0).toFixed(1)} kn · Πορεία: ${Math.round(s.cog ?? 0)}°<br>
+    Προορισμός: ${s.dest || "–"}<br><small>MMSI ${s.mmsi} · πριν ${ago} λεπτά</small>`;
+}
+async function refresh() {
+  try {
+    const r = await fetch("ships.json?" + Date.now());
+    const d = await r.json();
+    const seen = new Set();
+    for (const s of d.ships) {
+      seen.add(s.mmsi);
+      if (markers[s.mmsi]) markers[s.mmsi].setLatLng([s.lat, s.lon]).setIcon(icon(s)).setPopupContent(popup(s));
+      else markers[s.mmsi] = L.marker([s.lat, s.lon], { icon: icon(s) }).bindPopup(popup(s)).addTo(map);
+    }
+    for (const k of Object.keys(markers)) if (!seen.has(+k)) { map.removeLayer(markers[k]); delete markers[k]; }
+    document.getElementById("count").textContent = d.ships.length + " πλοία";
+    document.getElementById("moving").textContent = d.ships.filter(s => (s.sog ?? 0) > 0.5).length;
+    document.getElementById("upd").textContent = "ενημέρωση: " + new Date(d.updated * 1000).toLocaleTimeString("el-GR");
+  } catch (e) {
+    document.getElementById("upd").textContent = "αναμονή για δεδομένα…";
+  }
+}
+refresh(); setInterval(refresh, 10000);
+</script>
+</body>
+</html>
